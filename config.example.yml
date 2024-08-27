@@ -1,0 +1,7 @@
+discord:
+  token: "" # Your Discord Bot Token
+  channel_id: "" # The channel ID that you want to repost messages
+nostr:
+  pubkey: "" # Your public key in hex format. Use nostrcheck.me/converter to convert npub to hex
+  privkey: "" # Your Private key in hex format
+  relay_url: "wss://nos.lol" #The relay you want to publich to
