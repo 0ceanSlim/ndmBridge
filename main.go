@@ -1,12 +1,11 @@
 package main
 
 import (
-	"ndmBridge/nostr"
-	"ndmBridge/utils"
-
 	"encoding/hex"
 	"fmt"
 	"log"
+	"ndmBridge/nostr"
+	"ndmBridge/utils"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,8 +16,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/gorilla/websocket"
 )
-
-
 
 func main() {
 	// Load configuration from config.yml
@@ -33,19 +30,12 @@ func main() {
 		log.Fatalf("Error creating Discord session: %v", err)
 	}
 
-	// Establish a WebSocket connection to the Nostr relay
-	ws, _, err := websocket.DefaultDialer.Dial(config.Nostr.RelayURL, nil)
-	if err != nil {
-		log.Fatalf("Error connecting to Nostr relay: %v", err)
-	}
-	defer ws.Close()
-
-	// Add the message handler, passing the WebSocket connection to it
+	// Add the message handler
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		messageCreateHandler(s, m, config.Discord.ChannelID, config, ws)
+		messageCreateHandler(s, m, config.Discord.ChannelID, config)
 	})
 
-	// Open a websocket connection to Discord
+	// Open a WebSocket connection to Discord
 	err = dg.Open()
 	if err != nil {
 		log.Fatalf("Error opening connection: %v", err)
@@ -63,7 +53,7 @@ func main() {
 }
 
 // messageCreateHandler handles incoming Discord messages
-func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, channelID string, config *utils.Config, ws *websocket.Conn) {
+func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, channelID string, config *utils.Config) {
 	// Ignore messages from the bot itself
 	if m.Author.ID == s.State.User.ID {
 		return
@@ -96,6 +86,14 @@ func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, chan
 			fmt.Printf("Failed to sign event: %v\n", err)
 			return
 		}
+
+		// Establish a WebSocket connection to the Nostr relay, send the event, and then close the connection
+		ws, _, err := websocket.DefaultDialer.Dial(config.Nostr.RelayURL, nil)
+		if err != nil {
+			fmt.Printf("Error connecting to Nostr relay: %v\n", err)
+			return
+		}
+		defer ws.Close()
 
 		// Send the event to Nostr relay
 		err = nostr.SendEvent(ws, event)
