@@ -4,4 +4,4 @@ discord:
 nostr:
   pubkey: "" # Your public key in hex format. Use nostrcheck.me/converter to convert npub to hex
   privkey: "" # Your Private key in hex format
-  relay_url: "wss://nos.lol" #The relay you want to publich to
+  relay_url: "ws://localhost:8181" #"wss://bostr.lecturify.net/" #The relay you want to publich to

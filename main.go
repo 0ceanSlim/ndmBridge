@@ -18,8 +18,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
-
 func main() {
 	// Load configuration from config.yml
 	config, err := utils.LoadConfig("config.yml")
@@ -64,48 +62,63 @@ func main() {
 
 // messageCreateHandler handles incoming Discord messages
 func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, channelID string, config *utils.Config, ws *websocket.Conn) {
-	// Ignore messages from the bot itself
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
+    if m.Author.ID == s.State.User.ID {
+        return
+    }
 
-	if m.ChannelID == channelID {
-		// Create a new Nostr event
-		event := nostr.NostrEvent{
-			Pubkey:    config.Nostr.Pubkey,
-			CreatedAt: time.Now().Unix(),
-			Kind:      1, // Kind 1 for text note
-			Content:   m.Content,
-			Tags:      [][]string{}, // Empty tags array as required by NIP-01
-		}
+    if m.ChannelID == channelID {
+        content := m.Content
 
-		// Serialize and compute ID
-		eventStr, err := nostr.SerializeEventForID(event)
-		if err != nil {
-			fmt.Printf("Failed to serialize event for ID: %v\n", err)
-			return
-		}
+        // Append attachment URLs
+        for _, attachment := range m.Attachments {
+            content += "\n" + attachment.URL
+        }
 
-		event.ID = nostr.ComputeEventID(eventStr)
+        event := nostr.NostrEvent{
+            Pubkey:    config.Nostr.Pubkey,
+            CreatedAt: time.Now().Unix(),
+            Kind:      1,
+            Content:   content,
+            Tags:      [][]string{},
+        }
 
-		// Sign the event using Schnorr signature
-		privKeyBytes, _ := hex.DecodeString(config.Nostr.PrivKey)
-		privKey, _ := btcec.PrivKeyFromBytes(privKeyBytes)
-		event.Sig, err = SignEventSchnorr(event.ID, privKey)
-		if err != nil {
-			fmt.Printf("Failed to sign event: %v\n", err)
-			return
-		}
+        // Serialize and compute ID
+        eventStr, err := nostr.SerializeEventForID(event)
+        if err != nil {
+            fmt.Printf("Failed to serialize event for ID: %v\n", err)
+            return
+        }
 
-		// Send the event to Nostr relay
-		err = nostr.SendEvent(ws, event)
-		if err != nil {
-			fmt.Printf("Failed to send event: %v\n", err)
-		} else {
-			fmt.Println("Event sent successfully.")
-		}
-	}
+        // Log the serialized event string
+        fmt.Printf("Serialized Event String: %s\n", eventStr)
+
+        event.ID = nostr.ComputeEventID(eventStr)
+
+        // Log the computed event ID
+        fmt.Printf("Computed Event ID: %s\n", event.ID)
+
+        // Sign the event using Schnorr signature
+        privKeyBytes, _ := hex.DecodeString(config.Nostr.PrivKey)
+        privKey, _ := btcec.PrivKeyFromBytes(privKeyBytes)
+        event.Sig, err = SignEventSchnorr(event.ID, privKey)
+        if err != nil {
+            fmt.Printf("Failed to sign event: %v\n", err)
+            return
+        }
+
+        // Log the event signature
+        fmt.Printf("Event Signature: %s\n", event.Sig)
+
+        // Send the event to Nostr relay
+        err = nostr.SendEvent(ws, event)
+        if err != nil {
+            fmt.Printf("Failed to send event: %v\n", err)
+        } else {
+            fmt.Println("Event sent successfully.")
+        }
+    }
 }
+
 
 // SignEventSchnorr signs the event ID using Schnorr signatures
 func SignEventSchnorr(eventID string, privKey *btcec.PrivateKey) (string, error) {
