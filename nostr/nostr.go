@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
@@ -32,13 +33,17 @@ func SerializeEventForID(event NostrEvent) (string, error) {
 		event.Content,
 	}
 
-	// Convert to JSON without any unnecessary formatting (minified)
+	// Convert to JSON without escaping special characters like &
 	eventBytes, err := json.Marshal(serializedEvent)
 	if err != nil {
 		return "", err
 	}
 
-	return string(eventBytes), nil
+	// Fix escaped characters (e.g., \u0026 -> &)
+	eventStr := string(eventBytes)
+	eventStr = strings.ReplaceAll(eventStr, "\\u0026", "&")
+
+	return eventStr, nil
 }
 
 // ComputeEventID computes the ID for a given event
