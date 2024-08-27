@@ -8,6 +8,7 @@ import (
 	"ndmBridge/utils"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,12 +61,21 @@ func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, chan
 	}
 
 	if m.ChannelID == channelID {
+		// Start with the original message content
+		content := m.Content
+
+		// Append any attachment URLs to the content, ensuring they are correctly decoded
+		for _, attachment := range m.Attachments {
+			decodedURL := strings.ReplaceAll(attachment.URL, "\\u0026", "&")
+			content += "\n" + decodedURL
+		}
+
 		// Create a new Nostr event
 		event := nostr.NostrEvent{
 			Pubkey:    config.Nostr.Pubkey,
 			CreatedAt: time.Now().Unix(),
-			Kind:      1, // Kind 1 for text note
-			Content:   m.Content,
+			Kind:      1,
+			Content:   content, // Message content including URLs
 			Tags:      [][]string{}, // Empty tags array as required by NIP-01
 		}
 
@@ -95,7 +105,7 @@ func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, chan
 		}
 		defer ws.Close()
 
-		// Send the event to Nostr relay
+		// Send the event to Nostr relay and read the response
 		err = nostr.SendEvent(ws, event)
 		if err != nil {
 			fmt.Printf("Failed to send event: %v\n", err)

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	"github.com/gorilla/websocket"
 )
@@ -46,13 +47,31 @@ func ComputeEventID(serializedEvent string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-
-
-// SendEvent sends the event to the Nostr relay via WebSocket
+// SendEvent sends the event to the Nostr relay via WebSocket and reads the server's response
 func SendEvent(ws *websocket.Conn, event NostrEvent) error {
-	eventJSON, err := json.Marshal([]interface{}{"EVENT", event})
+	// Prepare the event in the required format: ["EVENT", <event object>]
+	msg := []interface{}{"EVENT", event}
+
+	// Serialize the message into JSON
+	eventJSON, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to serialize event: %v", err)
 	}
-	return ws.WriteMessage(websocket.TextMessage, eventJSON)
+
+	// Send the event to the relay
+	err = ws.WriteMessage(websocket.TextMessage, eventJSON)
+	if err != nil {
+		return fmt.Errorf("failed to send event: %v", err)
+	}
+
+	// Read the response from the relay
+	_, message, err := ws.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("failed to read response from relay: %v", err)
+	}
+
+	// Debugging: Print the response received from the relay
+	fmt.Printf("Received response from relay: %s\n", string(message))
+
+	return nil
 }
