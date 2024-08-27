@@ -1,4 +1,4 @@
-module ndmRepost
+module ndmBridge
 
 go 1.22.2
 
