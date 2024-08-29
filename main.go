@@ -1,21 +1,15 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"log"
 	"ndmBridge/nostr"
 	"ndmBridge/utils"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/bwmarrin/discordgo"
-	"github.com/gorilla/websocket"
 )
 
 func main() {
@@ -24,16 +18,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error loading config: %v", err)
 	}
+	log.Println("Config loaded successfully")
 
 	// Create a new Discord session using the provided bot token.
 	dg, err := discordgo.New("Bot " + config.Discord.Token)
 	if err != nil {
 		log.Fatalf("Error creating Discord session: %v", err)
 	}
+	log.Println("Discord session created successfully")
 
 	// Add the message handler
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		messageCreateHandler(s, m, config.Discord.ChannelID, config)
+		log.Printf("New message received: %s", m.Content)
+		messageCreateHandler(s, m, config)
 	})
 
 	// Open a WebSocket connection to Discord
@@ -44,6 +41,7 @@ func main() {
 	defer dg.Close()
 
 	fmt.Println("Bot is now running. Press CTRL+C to exit.")
+	log.Println("Bot is now running")
 
 	// Wait for a termination signal
 	stop := make(chan os.Signal, 1)
@@ -51,89 +49,32 @@ func main() {
 	<-stop
 
 	fmt.Println("Shutting down bot.")
+	log.Println("Shutting down bot")
 }
 
 // messageCreateHandler handles incoming Discord messages
-func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, channelID string, config *utils.Config) {
+func messageCreateHandler(s *discordgo.Session, m *discordgo.MessageCreate, config *utils.Config) {
 	if m.Author.ID == s.State.User.ID {
+		log.Println("Ignoring message from bot itself")
 		return
 	}
 
-	if m.ChannelID == channelID {
-		// Start with the message content
-		content := m.Content
+	if m.ChannelID == config.Discord.ChannelID {
+		content := nostr.PrepareMessageContent(m)
+		log.Printf("Prepared content for Nostr event: %s", content)
 
-		// Append each attachment's URL to the content, separated by a newline
-		for _, attachment := range m.Attachments {
-			decodedURL := strings.ReplaceAll(attachment.URL, "\\u0026", "&")
-			content += "\n" + decodedURL
-		}
-
-		fmt.Println("Content before serialization:", content)
-
-		// Create a new Nostr event with the fully prepared content
-		event := nostr.NostrEvent{
-			Pubkey:    config.Nostr.Pubkey,
-			CreatedAt: time.Now().Unix(),
-			Kind:      1,
-			Content:   content,      // Use the correctly formatted string content
-			Tags:      [][]string{}, // Empty tags array as required by NIP-01
-		}
-
-		// Serialize the event to generate the event ID
-		eventStr, err := nostr.SerializeEventForID(event)
+		event, err := nostr.CreateNostrEvent(content, config.Nostr.Pubkey)
 		if err != nil {
-			fmt.Printf("Failed to serialize event for ID: %v\n", err)
+			log.Printf("Error creating Nostr event: %v", err)
 			return
 		}
+		log.Printf("Nostr event created: %+v", event)
 
-		fmt.Println("Serialized event string:", eventStr)
-
-		// Compute the event ID as the SHA-256 hash of the serialized event
-		event.ID = nostr.ComputeEventID(eventStr)
-
-		fmt.Println("Computed event ID:", event.ID)
-
-		// Sign the event using Schnorr signature
-		privKeyBytes, _ := hex.DecodeString(config.Nostr.PrivKey)
-		privKey, _ := btcec.PrivKeyFromBytes(privKeyBytes)
-		event.Sig, err = SignEventSchnorr(event.ID, privKey)
+		err = nostr.SignAndSendEvent(event, config.Nostr.PrivKey, config.Nostr.RelayURL)
 		if err != nil {
-			fmt.Printf("Failed to sign event: %v\n", err)
-			return
-		}
-
-		fmt.Println("Signed event signature:", event.Sig)
-
-		// Establish a WebSocket connection to the Nostr relay, send the event, and then close the connection
-		ws, _, err := websocket.DefaultDialer.Dial(config.Nostr.RelayURL, nil)
-		if err != nil {
-			fmt.Printf("Error connecting to Nostr relay: %v\n", err)
-			return
-		}
-		defer ws.Close()
-
-		// Send the event to Nostr relay and read the response
-		err = nostr.SendEvent(ws, event)
-		if err != nil {
-			fmt.Printf("Failed to send event: %v\n", err)
+			log.Printf("Error sending Nostr event: %v", err)
 		} else {
-			fmt.Println("Event sent successfully.")
+			log.Println("Nostr event sent successfully")
 		}
 	}
-}
-
-// SignEventSchnorr signs the event ID using Schnorr signatures
-func SignEventSchnorr(eventID string, privKey *btcec.PrivateKey) (string, error) {
-	idBytes, err := hex.DecodeString(eventID)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode event ID: %w", err)
-	}
-
-	sig, err := schnorr.Sign(privKey, idBytes)
-	if err != nil {
-		return "", fmt.Errorf("failed to sign event with Schnorr: %w", err)
-	}
-
-	return hex.EncodeToString(sig.Serialize()), nil
 }
