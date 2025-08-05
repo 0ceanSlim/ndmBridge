@@ -1,11 +1,15 @@
 package nostr
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"mime/multipart"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -27,7 +31,13 @@ type NostrEvent struct {
 	Sig       string     `json:"sig"`
 }
 
-// PrepareMessageContent prepares the message content by removing all mentions and appending attachment URLs
+const (
+	ox0URL      = "https://0x0.st"
+	maxFileSize = 512 * 1024 * 1024 // 512 MiB as per 0x0.st limits
+	httpTimeout = 30 * time.Second
+)
+
+// PrepareMessageContent prepares the message content by removing mentions and uploading attachments to 0x0.st
 func PrepareMessageContent(m *discordgo.MessageCreate) string {
 	content := m.Content
 
@@ -40,13 +50,124 @@ func PrepareMessageContent(m *discordgo.MessageCreate) string {
 	// Remove role mentions (e.g., <@&RoleID>)
 	content = removeMentions(content, `<@&[0-9]+>`)
 
+	// Process attachments and upload to 0x0.st
 	for _, attachment := range m.Attachments {
 		decodedURL := strings.ReplaceAll(attachment.URL, "\\u0026", "&")
-		content += "\n" + decodedURL
+
+		// Try to upload to 0x0.st with retry logic
+		ox0URL, err := uploadToOx0WithRetry(decodedURL, attachment.Filename, 3)
+		if err != nil {
+			log.Printf("Failed to upload %s to 0x0.st: %v, using original URL", attachment.Filename, err)
+			content += "\n" + decodedURL
+		} else {
+			log.Printf("Successfully uploaded %s to 0x0.st: %s", attachment.Filename, ox0URL)
+			content += "\n" + ox0URL
+		}
 	}
 
-	log.Printf("Message content prepared after removing mentions: %s", content)
+	log.Printf("Message content prepared: %s", content)
 	return content
+}
+
+// uploadToOx0 uploads a file from a URL to 0x0.st and returns the new URL
+func uploadToOx0(fileURL, filename string) (string, error) {
+	log.Printf("Attempting to upload %s to 0x0.st", filename)
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: httpTimeout,
+	}
+
+	// Prepare the multipart form
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add the URL field (0x0.st can fetch from remote URLs)
+	err := writer.WriteField("url", fileURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to write url field: %w", err)
+	}
+
+	// Add secret field for hard-to-guess URLs
+	err = writer.WriteField("secret", "")
+	if err != nil {
+		return "", fmt.Errorf("failed to write secret field: %w", err)
+	}
+
+	// Set expiration to maximum (8760 hours = 1 year)
+	err = writer.WriteField("expires", "8760")
+	if err != nil {
+		return "", fmt.Errorf("failed to write expires field: %w", err)
+	}
+
+	err = writer.Close()
+	if err != nil {
+		return "", fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	// Create the request
+	req, err := http.NewRequest("POST", ox0URL, &buf)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("User-Agent", "ndmBridge/1.0")
+
+	// Send the request
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("0x0.st returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// The response should be the URL
+	ox0ResponseURL := strings.TrimSpace(string(body))
+
+	// Validate the response looks like a URL
+	if !strings.HasPrefix(ox0ResponseURL, "https://0x0.st/") {
+		return "", fmt.Errorf("unexpected response from 0x0.st: %s", ox0ResponseURL)
+	}
+
+	// Optionally append the original filename for better presentation
+	if filename != "" {
+		ox0ResponseURL = fmt.Sprintf("%s/%s", ox0ResponseURL, filename)
+	}
+
+	return ox0ResponseURL, nil
+}
+
+// uploadToOx0WithRetry uploads a file to 0x0.st with retry logic
+func uploadToOx0WithRetry(fileURL, filename string, maxRetries int) (string, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		url, err := uploadToOx0(fileURL, filename)
+		if err == nil {
+			return url, nil
+		}
+
+		lastErr = err
+		log.Printf("Attempt %d failed to upload %s to 0x0.st: %v", attempt, filename, err)
+
+		if attempt < maxRetries {
+			delay := time.Duration(attempt) * 2 * time.Second
+			log.Printf("Retrying upload in %v...", delay)
+			time.Sleep(delay)
+		}
+	}
+
+	return "", fmt.Errorf("failed to upload %s after %d attempts: %w", filename, maxRetries, lastErr)
 }
 
 // removeMentions removes all matches of the given regex pattern from the content
@@ -128,7 +249,7 @@ func SignAndSendEvent(event *NostrEvent, privKeyHex, relayURL string) error {
 	event.Sig = sig
 	log.Printf("Event signed with Schnorr signature: %s", event.Sig)
 
-	return SendEvent(relayURL, *event)
+	return SendEventWithRetry(relayURL, *event, 3)
 }
 
 // SignEventSchnorr signs the event ID using Schnorr signatures
@@ -151,14 +272,47 @@ func SignEventSchnorr(eventID string, privKey *btcec.PrivateKey) (string, error)
 	return sigStr, nil
 }
 
+// SendEventWithRetry sends the event to the Nostr relay with retry logic
+func SendEventWithRetry(relayURL string, event NostrEvent, maxRetries int) error {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		err := SendEvent(relayURL, event)
+		if err == nil {
+			log.Printf("Event sent successfully on attempt %d", attempt)
+			return nil
+		}
+
+		lastErr = err
+		log.Printf("Attempt %d failed to send event: %v", attempt, err)
+
+		if attempt < maxRetries {
+			delay := time.Duration(attempt) * 2 * time.Second
+			log.Printf("Retrying in %v...", delay)
+			time.Sleep(delay)
+		}
+	}
+
+	return fmt.Errorf("failed to send event after %d attempts: %w", maxRetries, lastErr)
+}
+
 // SendEvent sends the event to the Nostr relay via WebSocket and reads the server's response
 func SendEvent(relayURL string, event NostrEvent) error {
-	ws, _, err := websocket.DefaultDialer.Dial(relayURL, nil)
+	// Set a connection timeout
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	ws, _, err := dialer.Dial(relayURL, nil)
 	if err != nil {
 		log.Printf("Error connecting to Nostr relay: %v", err)
 		return fmt.Errorf("error connecting to Nostr relay: %v", err)
 	}
 	defer ws.Close()
+
+	// Set write deadline
+	ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
 	log.Println("Connected to Nostr relay successfully")
 
 	msg := []interface{}{"EVENT", event}
@@ -175,6 +329,9 @@ func SendEvent(relayURL string, event NostrEvent) error {
 		return fmt.Errorf("failed to send event: %v", err)
 	}
 
+	// Set read deadline
+	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
+
 	_, message, err := ws.ReadMessage()
 	if err != nil {
 		log.Printf("Error reading response from relay: %v", err)
@@ -182,6 +339,5 @@ func SendEvent(relayURL string, event NostrEvent) error {
 	}
 
 	log.Printf("Received response from relay: %s", string(message))
-
 	return nil
 }
